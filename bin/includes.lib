@@ -1,0 +1,260 @@
+#############################################
+# variable definitions
+#############################################
+DEBUG=0
+platform=`uname`
+progname=`basename $0`
+version="1.0"
+errcount=0
+term_width=`tput cols`
+bold=`tput smso`
+nobold=`tput rmso`
+ul_on=`tput smul`
+ul_off=`tput rmul`
+
+#############################################
+# directory definitions
+#############################################
+basedir=`pwd`
+bindir="${basedir}/bin"
+bionic_files="${basedir}/bionic_files"
+fxz_files="${basedir}/VRZ_XT875_5.5.893.XT875.Verizon.en.US_CFC_01.xml"
+
+#############################################
+# setup adb and fastboot commands
+#############################################
+adb="${bindir}/adb.$platform"
+if [ `uname -m` == "x86_64" ]; then
+  fastboot="${bindir}/moto-fastboot64.$platform"
+else
+  fastboot="${bindir}/moto-fastboot32.$platform"
+fi
+
+# if in debug mode use fake adb and fastboot
+if [ $DEBUG -eq 1 ]; then
+  adb=`which true`
+  fastboot=`which true`
+fi
+
+#############################################
+# required files definitions
+#############################################
+bin_required_files="$adb $fastboot"
+fxz_required_files="${bionic_files}/cdt.bin.901 ${fxz_files}/allow-mbmloader-flashing-mbm.bin ${fxz_files}/mbmloader.bin ${fxz_files}/cdt.bin ${fxz_files}/lbl ${fxz_files}/logo.bin ${fxz_files}/ebr ${fxz_files}/mbr ${fxz_files}/device_tree.bin ${fxz_files}/system.img ${fxz_files}/boot.img ${fxz_files}/recovery.img ${fxz_files}/cdrom ${fxz_files}/preinstall.img ${fxz_files}/emstorage.img ${fxz_files}/grfs.img ${fxz_files}/radio.img "
+root_required_files="${bionic_files}/zergRush ${bionic_files}/Superuser.apk ${bionic_files}/su ${bionic_files}/busybox"
+
+#############################################
+# function definitions
+#############################################
+
+check_supported_platform() {
+
+# verify its either linux or mac osx
+if [ $platform != "Linux" -a $platform != "Darwin" ]; then
+   err_exit "Unsupported Operating System: $platform"
+fi
+
+# sorry old mac users, time for an upgrade
+if [ $(uname -p) = 'powerpc' ]; then
+    err_exit "This won't work on PowerPC machines"
+fi
+
+}
+
+#############################################
+# print out error message and exit
+err_exit() {
+    echo ""
+    echo "DANGER, DANGER, WILL ROBINSON!!!"
+    echo ""
+    echo "*** Error: $1 ***"
+    echo ""
+    echo "Please include this information when reporting issues:"
+    echo "Program name: $progname"
+    echo "Script Rev: $version"
+    echo "Current directory: $PWD"
+    echo -n "OS Info: "; uname -a
+    echo ""
+    echo "Listing of directory: $basedir"
+    ls $basedir
+    echo ""
+    echo "If you think this is a bug, then, please report this information"
+    echo "along with what you were doing just before you saw this."
+    read -n1 -p "Press the Enter key to continue."
+    exit 1
+}
+
+#############################################
+# function to exit cleanly - caught by trap 
+# clean up any adb servers that may be hanging around
+# reset terminal to clear up any weird terminal settings
+adios_mofo() {
+    echo ""
+    echo "*** Ctrl-C detected - as you wish..."
+    echo "Cleaning up some things, then exiting, hang on a second..."
+    sudo $adb kill-server
+    echo ""
+    read -n1 -p "Ok, press any key to exit, your terminal window will clear."
+    reset
+    echo "Exited $progname at your request"
+    echo ""
+    echo "Program name: $progname"
+    echo "Script Rev: $version"
+    echo "Current directory: $PWD"
+    echo -n "OS Info: "; uname -a
+    echo ""
+    echo "Bionic Build Version: $build_version"
+    echo ""
+    exit 1
+}
+
+#############################################
+# loop and wait for adb to get into 'devices' state
+check_adb_state() {
+  trap adios_mofo INT TERM
+  adb_state=`sudo $adb get-state`
+  if [ $DEBUG -eq 1 ]; then
+    adb_state="device"
+  fi
+  while [ "$adb_state" != "device" ]; do
+    echo "Waiting for Bionic to enter correct USB state"
+    echo "You can enter Ctrl-C at anytime to exit this program and start over"
+    sudo $adb wait-for-device
+    adb_state=`sudo $adb get-state`
+  done
+}
+
+#############################################
+# get build version from Bionic
+
+get_build_version() {
+  tmpx=`sudo $adb shell "cat /system/build.prop" |grep "ro.build.version.full"` 2>/dev/null
+  build_version=${tmpx%?}
+}
+
+#############################################
+# check if all the required files are here
+# this is called with the list of files as an argument
+# returns proper exit code
+check_required_files () {
+  required_files=$1
+  errcount=0
+  for file in $required_files; do
+    if [ $DEBUG -ne 0 ]; then
+      echo "checking required file: $file"
+    fi
+    if [ ! -f $file ]; then
+      echo "Required file == $file == is missing."
+      let errcount=$errcount+1
+    fi
+  done
+  if [ $errcount -ne 0 ]; then
+    echo "Missing $errcount files(s), sure you are running from the correct directory?"
+    return 1
+  else
+    return 0
+  fi
+}
+
+# runs fastboot with parameters passed and checks error code
+my_fastboot() {
+  case $# in 
+    3)
+      echo "Running: $fastboot $1 $2 $3"
+      sudo $fastboot $1 $2 ${fxz_files}/$3
+      ;;
+    2)
+      echo "Running: $fastboot $1 $2"
+      sudo $fastboot $1 $2
+      ;;
+    1)
+      echo "Running: $fastboot $1"
+      sudo $fastboot $1
+      ;;
+    *)
+      err_exit "(my_fastboot called with invalid number of parameters)"
+      ;;
+  esac
+  if [ $? -ne 0 ]; then
+    print_dashes
+    print_out "****  ERROR OCCURRED, NOT STOPPING ****"
+    print_dashes
+  fi
+}
+
+# Preload the sudo command - this should keep it to prompting only once
+# under out control
+preload_sudo() {
+  echo "Enter YOUR password when prompted."
+  echo "NOTE: Nothing prints while you type your password."
+  tmp=`sudo pwd`
+  if [ $? -ne 0 ]; then
+    echo "Bad Password? You need to enter YOUR password, one more try..."
+  fi
+  echo ""
+  tmp=`sudo pwd`
+  if [ $? -ne 0 ]; then
+    err_exit "Bad Password? You needed to enter YOUR password. Try again."
+  fi
+}
+
+#############################################
+# print line of dashes the width of the terminal
+print_dashes() {
+  for ((dashes=1;dashes<=${term_width};dashes+=1));do printf "%s" "-"; done
+  echo ""
+}
+
+ 
+#############################################
+# print output passed padded to width of terminal
+print_out() {
+  printf "%-${term_width}s\n" "$1"
+}
+
+#############################################
+# if DEBUG is defined print this out in BOLD!
+print_debug_mode () {
+    if [ $DEBUG -ne 0 ]; then
+      echo $bold
+      print_dashes
+      print_out "NOTE: This script is running in DEBUG mode. It will not restore or root your"
+      print_out "phone in this mode. If you want to actually do that then you will need to edit"
+      print_out "this file and change the line:"
+      print_out "DEBUG=1"
+      print_out "  to"
+      print_out "DEBUG=0"
+      print_dashes
+      echo $nobold
+    fi
+}
+
+#############################################
+print_credits() {
+echo "$bold The dwarf sees farther than the giant, when he has the giant's shoulder to mount on. $nobold"
+
+cat << _EOF
+
+*****************************************************************************
+* Special thanks to dhacker29 and DroidTh3ory for R3L3ASED and FOR3V3R ROOT *
+* for the BIONIC as well as their 1ClickRestore - they got me onto coding   *
+* this - my wife will never forgive them... -crpeck                         *
+*                                                                           *
+* A special thanks for the info and files to:                               *
+* revolutionary for zergRush https://github.com/revolutionary               *
+* P3Droid for the Forever Root method http://http://www.mydroidworld.com    *
+* Soulshadow for the stunning procedure                                     *
+*                                                                           *
+* Thanks to others not mentioned, especially for the Fastboot Files 5.5.893 *
+* at: http://rootzwiki.com/topic/13700-fastboot-files-55893-fxz-leaked/     *
+*****************************************************************************
+
+_EOF
+}
+
+#############################################
+# v1.0 - 20111027 - crpeck - initial creation
+#        moved many of the checking and out put functions here to make scripts a little cleaner
+#        check_required_file checks for ALL files now and lists all that are missing
+#
+# eof
